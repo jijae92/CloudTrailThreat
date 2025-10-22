@@ -1,0 +1,37 @@
+"""IaC helper utilities for SAM/CloudFormation templates."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, Iterable, List
+
+import yaml
+
+from .fileio import ensure_path
+
+
+def load_template(path_str: str) -> Dict[str, object]:
+    """Load a YAML or JSON template into a dictionary."""
+    path = ensure_path(path_str)
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in {".json"}:
+        return json.loads(text)
+    return yaml.safe_load(text)
+
+
+def find_resources(template: Dict[str, object], resource_type: str) -> List[Dict[str, object]]:
+    """Return resources matching ``resource_type``."""
+    resources = template.get("Resources", {}) if isinstance(template, dict) else {}
+    matches: List[Dict[str, object]] = []
+    for value in resources.values():
+        if isinstance(value, dict) and value.get("Type") == resource_type:
+            matches.append(value)
+    return matches
+
+
+def list_resource_types(template: Dict[str, object]) -> Iterable[str]:
+    """Yield all resource types contained in the template."""
+    resources = template.get("Resources", {}) if isinstance(template, dict) else {}
+    for value in resources.values():
+        if isinstance(value, dict) and "Type" in value:
+            yield value["Type"]

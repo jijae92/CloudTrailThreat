@@ -1,0 +1,10 @@
+{
+  "allowlist": [
+    {
+      "rule_id": "ENV_SECRET_001",
+      "resource_id": "example/path.py",
+      "expires_at": "2025-12-31T00:00:00Z",
+      "reason": "Document accepted for temporary testing"
+    }
+  ]
+}

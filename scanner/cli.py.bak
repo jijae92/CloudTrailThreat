@@ -1,0 +1,95 @@
+"""Command-line interface orchestrating rule execution."""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+from typing import Callable, Iterable, List
+
+from .result import Finding, ScanResult, merge_findings, result_to_json, result_to_text
+from .rules import env_secret, iam_leastpriv, vpc_egress
+from .severity import Severity
+from .utils import fileio
+
+LOGGER = logging.getLogger("scanner")
+RULES: List[Callable[..., Iterable[Finding]]] = [
+    env_secret.scan,
+    iam_leastpriv.scan,
+    vpc_egress.scan,
+]
+
+
+def _configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s %(message)s",
+    )
+
+
+def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Serverless guardrails scanner")
+    parser.add_argument("--template", help="Path to SAM/CloudFormation template", required=False)
+    parser.add_argument("--source", help="Path to Python source file for code analysis", required=False)
+    parser.add_argument("--format", choices=["json", "text"], default="text", help="Output format")
+    parser.add_argument("--out", help="Optional output file path")
+    parser.add_argument(
+        "--fail-on",
+        default=Severity.HIGH.value,
+        help="Severity threshold that triggers a non-zero exit code",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Run without writing outputs")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--json", action="store_true", help="Shortcut for --format json")
+    return parser.parse_args(list(argv))
+
+
+def _severity_rank(severity: Severity) -> int:
+    order = [Severity.INFO, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+    return order.index(severity)
+
+
+def _should_fail(findings: Iterable[Finding], threshold: Severity) -> bool:
+    threshold_rank = _severity_rank(threshold)
+    return any(_severity_rank(f.severity) >= threshold_rank for f in findings)
+
+
+def run_cli(argv: Iterable[str] | None = None) -> None:
+    args = _parse_args(argv or sys.argv[1:])
+    if args.json:
+        args.format = "json"
+    _configure_logging(args.verbose)
+
+    LOGGER.debug("CLI arguments parsed: %s", args)
+    template = args.template
+    source = args.source
+
+    all_findings: List[Finding] = []
+    for rule in RULES:
+        try:
+            results = list(rule(template_path=template, source_path=source))
+            LOGGER.debug("Rule %s produced %d findings", rule.__module__, len(results))
+            all_findings.extend(results)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.error("Rule %s failed: %s", rule.__module__, exc)
+
+    summary = (
+        "Scan completed with findings" if all_findings else "Scan completed without findings"
+    )
+    scan_result = ScanResult(summary=summary, findings=all_findings)
+    output_text = result_to_json(scan_result) if args.format == "json" else result_to_text(scan_result)
+
+    if args.out and not args.dry_run:
+        saved_path = fileio.save_text(args.out, output_text)
+        LOGGER.info("Results written to %s", saved_path)
+
+    if args.format == "json":
+        print(output_text)
+    else:
+        print(output_text.splitlines()[0] if not args.verbose else output_text)
+
+    threshold = Severity.from_cli(args.fail_on)
+    if _should_fail(all_findings, threshold):
+        print("Error: findings exceed threshold. Remediate and retry.")
+        sys.exit(2)
+    print("Scan completed successfully")

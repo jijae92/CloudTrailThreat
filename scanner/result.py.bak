@@ -1,0 +1,73 @@
+"""Result schema models for scanner output."""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from typing import Iterable, List
+
+from .severity import Severity
+
+
+@dataclass(frozen=True)
+class Finding:
+    """Represents a single guardrail finding."""
+
+    rule_id: str
+    description: str
+    severity: Severity
+    resource_id: str
+    remediation: str
+
+    def to_dict(self) -> dict:
+        """Convert to a JSON-serialisable dictionary."""
+        payload = asdict(self)
+        payload["severity"] = self.severity.value
+        return payload
+
+
+@dataclass
+class ScanResult:
+    """Aggregate of findings for a single scan run."""
+
+    summary: str
+    findings: List[Finding] = field(default_factory=list)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def passed(self) -> bool:
+        """True when every finding is informational or better."""
+        return all(f.severity in {Severity.INFO, Severity.LOW} for f in self.findings)
+
+    def to_dict(self) -> dict:
+        """Convert the result into a serialisable payload."""
+        return {
+            "summary": self.summary,
+            "started_at": self.started_at.isoformat(),
+            "passed": self.passed,
+            "findings": [finding.to_dict() for finding in self.findings],
+            "total_findings": len(self.findings),
+        }
+
+
+def result_to_json(result: ScanResult) -> str:
+    """Serialize a scan result into a JSON string."""
+    return json.dumps(result.to_dict(), indent=2, sort_keys=True)
+
+
+def result_to_text(result: ScanResult) -> str:
+    """Serialize a scan result into a human-friendly string."""
+    lines = [f"Summary: {result.summary}", f"Passed: {result.passed}"]
+    for finding in result.findings:
+        lines.append(
+            f"- [{finding.severity.value}] {finding.rule_id} -> {finding.resource_id}: {finding.description}"
+        )
+    return "\n".join(lines)
+
+
+def merge_findings(*results: Iterable[Finding]) -> List[Finding]:
+    """Flatten multiple finding iterables preserving order."""
+    merged: List[Finding] = []
+    for iterable in results:
+        merged.extend(iterable)
+    return merged

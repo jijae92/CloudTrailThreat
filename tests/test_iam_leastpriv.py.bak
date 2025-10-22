@@ -1,0 +1,12 @@
+"""Tests for the IAM least privilege rule stub."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from scanner.rules import iam_leastpriv
+
+
+def test_iam_rule_flags_wildcard_policy() -> None:
+    template = Path(__file__).resolve().parents[1] / "templates" / "app-sam.yaml"
+    findings = iam_leastpriv.scan(template_path=str(template))
+    assert any(f.resource_id == "VulnerableFunction" for f in findings)

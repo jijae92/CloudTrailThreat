@@ -1,0 +1,65 @@
+"""Rule enforcing simple IAM least privilege heuristics."""
+from __future__ import annotations
+
+from typing import Dict, Iterable, List, Optional
+
+from ..result import Finding
+from ..severity import Severity
+from ..utils import iac
+
+RULE_ID = "IAM_LEASTPRIV_001"
+RULE_DESCRIPTION = "Flag IAM policies that allow wildcard actions or resources."
+
+
+def _policy_allows_wildcard(policy: Dict[str, object]) -> bool:
+    for statement in policy.get("Statement", []):
+        if not isinstance(statement, dict):
+            continue
+        action = statement.get("Action")
+        resource = statement.get("Resource")
+        if action == "*" or resource == "*":
+            return True
+        if isinstance(action, list) and "*" in action:
+            return True
+        if isinstance(resource, list) and "*" in resource:
+            return True
+    return False
+
+
+def _iter_policies(resource: Dict[str, object]) -> Iterable[Dict[str, object]]:
+    """Yield policy documents from resource definitions."""
+    if resource.get("Type") in {"AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"}:
+        document = resource.get("Properties", {}).get("PolicyDocument", {})
+        if isinstance(document, dict):
+            yield document
+    if resource.get("Type") == "AWS::Serverless::Function":
+        policies = resource.get("Properties", {}).get("Policies", [])
+        if isinstance(policies, list):
+            for entry in policies:
+                if isinstance(entry, dict):
+                    yield entry
+
+
+def scan(template_path: Optional[str] = None, **_: object) -> List[Finding]:
+    """Examines IAM policies for wildcard privileges."""
+    if not template_path:
+        return []
+
+    template = iac.load_template(template_path)
+    findings: List[Finding] = []
+    for name, resource in template.get("Resources", {}).items():
+        if not isinstance(resource, dict):
+            continue
+        for policy in _iter_policies(resource):
+            if _policy_allows_wildcard(policy):
+                findings.append(
+                    Finding(
+                        rule_id=RULE_ID,
+                        description="IAM policy grants wildcard access.",
+                        severity=Severity.MEDIUM,
+                        resource_id=name,
+                        remediation="Replace '*' with explicit actions/resources.",
+                    )
+                )
+                break
+    return findings

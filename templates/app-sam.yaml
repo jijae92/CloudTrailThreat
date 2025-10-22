@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sample SAM template for guardrails testing with vulnerable and safe variants.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 10
+    MemorySize: 128
+
+Resources:
+  VulnerableFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: VulnerablePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:*
+                Resource: "*"
+      Path: "/"
+
+  VulnerableSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open egress for demonstration
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: vpc-1234567890abcdef0
+      CidrBlock: 10.0.0.0/24
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: vpc-1234567890abcdef0
+      Routes:
+        - DestinationCidrBlock: 0.0.0.0/0
+          GatewayId: igw-1234567890abcdef0
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  VulnerableFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions/vulnerable/app.handler
+      CodeUri: functions/vulnerable/
+      Role: !GetAtt VulnerableFunctionRole.Arn
+      VpcConfig:
+        SubnetIds:
+          - !Ref PublicSubnet
+        SecurityGroupIds:
+          - !Ref VulnerableSecurityGroup
+      Environment:
+        Variables:
+          API_KEY: "AKIA1234567890ABCD12"
+          SECRET_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+          SERVICE_ENDPOINT: "https://api.example.com"
+
+  SafeFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SafeLoggingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+      Path: "/"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: vpc-1234567890abcdef0
+      CidrBlock: 10.0.1.0/24
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: vpc-1234567890abcdef0
+      Routes:
+        - DestinationCidrBlock: 10.0.2.0/24
+          VpcEndpointId: vpce-1234567890abcdef0
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  SafeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Restricted egress demo
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.2.0/24
+
+  SafeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions/safe/app.handler
+      CodeUri: functions/safe/
+      Role: !GetAtt SafeFunctionRole.Arn
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet
+        SecurityGroupIds:
+          - !Ref SafeSecurityGroup
+      Environment:
+        Variables:
+          SECRET_ALIAS: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:guardrails-demo
+      # Use Secrets Manager or SSM Parameter Store: e.g.
+      # Environment:
+      #   Variables:
+      #     SECRET_ALIAS: !Sub '{{resolve:secretsmanager:${SecretName}:SecretString:token}}'
+
+Outputs:
+  VulnerableFunctionArn:
+    Description: ARN of the vulnerable test function
+    Value: !GetAtt VulnerableFunction.Arn
+  SafeFunctionArn:
+    Description: ARN of the secure reference function
+    Value: !GetAtt SafeFunction.Arn

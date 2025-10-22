@@ -1,0 +1,18 @@
+[project]
+name = "serverless-guardrails"
+version = "0.1.0"
+description = "Skeleton project for serverless guardrails scanning"
+authors = [{ name = "Your Team" }]
+requires-python = "~=3.11"
+dependencies = [
+  "pyyaml==6.0.2"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.2"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"

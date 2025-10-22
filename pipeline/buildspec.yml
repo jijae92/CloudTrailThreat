@@ -1,0 +1,26 @@
+version: 0.2
+environment_variables:
+  plaintext:
+    FAIL_ON: MEDIUM
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+  pre_build:
+    commands:
+      - python -m venv .venv
+      - source .venv/bin/activate
+      - pip install -r requirements.txt
+      - pytest --maxfail=1 --disable-warnings -q
+  build:
+    commands:
+      - source .venv/bin/activate
+      - python -m scanner --template templates/app-sam.yaml --source functions/vulnerable --format json --out artifacts/scan.json --fail-on "$FAIL_ON"
+  post_build:
+    commands:
+      - cat artifacts/scan.json
+      - echo "Exit code rule applied by scanner"
+artifacts:
+  base-directory: artifacts
+  files:
+    - scan.json

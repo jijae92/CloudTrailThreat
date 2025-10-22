@@ -1,0 +1,52 @@
+"""Rule detecting wide-open VPC egress rules."""
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+from ..result import Finding
+from ..severity import Severity
+from ..utils import iac
+
+RULE_ID = "VPC_EGRESS_001"
+RULE_DESCRIPTION = "Ensure security groups do not allow 0.0.0.0/0 egress on all ports."
+
+
+_ALLOWED_ALL_PORTS = {"-1", -1}
+
+
+def _is_open_cidr(cidr: str) -> bool:
+    return cidr in {"0.0.0.0/0", "::/0"}
+
+
+def scan(template_path: Optional[str] = None, **_: object) -> List[Finding]:
+    """Detect security group egress rules that are fully open."""
+    if not template_path:
+        return []
+
+    template = iac.load_template(template_path)
+    findings: List[Finding] = []
+    for name, resource in template.get("Resources", {}).items():
+        if not isinstance(resource, dict):
+            continue
+        if resource.get("Type") != "AWS::EC2::SecurityGroup":
+            continue
+        properties: Dict[str, object] = resource.get("Properties", {})  # type: ignore[assignment]
+        for rule in properties.get("SecurityGroupEgress", []) or []:
+            if not isinstance(rule, dict):
+                continue
+            cidr_ipv4 = rule.get("CidrIp")
+            cidr_ipv6 = rule.get("CidrIpv6")
+            if any(_is_open_cidr(cidr) for cidr in (cidr_ipv4, cidr_ipv6) if isinstance(cidr, str)):
+                to_port = rule.get("ToPort")
+                from_port = rule.get("FromPort")
+                if to_port in _ALLOWED_ALL_PORTS and from_port in _ALLOWED_ALL_PORTS:
+                    findings.append(
+                        Finding(
+                            rule_id=RULE_ID,
+                            description="Security group egress open to the world on all ports.",
+                            severity=Severity.HIGH,
+                            resource_id=name,
+                            remediation="Restrict egress CIDR range or port scope.",
+                        )
+                    )
+    return findings

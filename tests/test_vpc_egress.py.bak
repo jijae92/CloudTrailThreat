@@ -1,0 +1,12 @@
+"""Tests for the VPC egress guardrail."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from scanner.rules import vpc_egress
+
+
+def test_vpc_egress_open_world_detected() -> None:
+    template = Path(__file__).resolve().parents[1] / "templates" / "app-sam.yaml"
+    findings = vpc_egress.scan(template_path=str(template))
+    assert any("OpenSecurityGroup" == f.resource_id for f in findings)

@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Serverless guardrails pipeline with static scan gate and manual approval.
+  NOTE: replace token placeholders before deployment.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 10
+
+Parameters:
+  RepositoryProvider:
+    Type: String
+    AllowedValues:
+      - GitHub
+      - CodeCommit
+    Default: GitHub
+    Description: Source code provider for the pipeline.
+  RepositoryConnectionArn:
+    Type: String
+    Description: ARN of the CodeStar Connections or CodeCommit repository connection.
+  RepositoryId:
+    Type: String
+    Description: For GitHub use owner/repo; for CodeCommit use repository name.
+  BranchName:
+    Type: String
+    Default: main
+    Description: Branch to monitor for changes.
+  CodeBuildProjectName:
+    Type: String
+    Default: GuardrailsStaticScan
+    Description: Name for the CodeBuild project.
+  ScanFailOn:
+    Type: String
+    Default: MEDIUM
+    AllowedValues:
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+    Description: Severity threshold that fails the scan. Passed to CodeBuild env.
+
+Resources:
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: codepipeline.amazonaws.com
+      Policies:
+        - PolicyName: PipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub '${PipelineArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                Resource: '*'
+              - Effect: Allow
+                Action: codepipeline:PutApprovalResult
+                Resource: '*'
+      Description: >-
+        Minimal privileges: Start CodeBuild, interact with artifacts, deploy via CloudFormation,
+        record manual approvals. Extend cautiously for additional stages.
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: codebuild.amazonaws.com
+      Policies:
+        - PolicyName: BuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${PipelineArtifactBucket.Arn}/*'
+      Description: >-
+        Minimal privileges: S3 artifact read/write and CloudWatch Logs publish.
+        Extend only if build requires additional AWS APIs.
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildProjectName
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: FAIL_ON
+            Value: !Ref ScanFailOn
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: !If [IsGitHub, CodeStarSourceConnection, CodeCommit]
+                Version: '1'
+              Configuration: !If
+                - IsGitHub
+                - {
+                    ConnectionArn: !Ref RepositoryConnectionArn,
+                    FullRepositoryId: !Ref RepositoryId,
+                    BranchName: !Ref BranchName
+                  }
+                - {
+                    RepositoryName: !Ref RepositoryId,
+                    BranchName: !Ref BranchName,
+                    PollForSourceChanges: false
+                  }
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: StaticScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectName
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              # Option A: rely on CodeBuild failure to halt the pipeline; Deploy stage will not run on failed scan.
+        - Name: Approval
+          Actions:
+            - Name: ManualReview
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: >-
+                  Review scan summary (top 10 findings) from artifacts/scan.json before approving deployment.
+        - Name: Deploy
+          Actions:
+            - Name: DeployStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                StackName: serverless-guardrails-demo
+                TemplatePath: BuildOutput::templates/app-sam.yaml
+                ParameterOverrides: !Sub '{"ScanFailOn":"${ScanFailOn}"}'
+              InputArtifacts:
+                - Name: BuildOutput
+              # Option B: attach PreDeploy/PostDeploy hooks using LambdaInvoke actions.
+              #   - Insert a Lambda Invoke action (provider: Lambda) before DeployStack that calls functions/hooks/pre_deploy.
+              #   - Add a Lambda Invoke action after DeployStack referencing functions/hooks/post_deploy.
+              #   - The Lambda handler should return success to continue or raise to fail the pipeline.
+              # Gate messaging suggestion: update manual approval comment with top 10 findings from artifacts/scan.json.
+
+Conditions:
+  IsGitHub: !Equals [!Ref RepositoryProvider, GitHub]
+
+Outputs:
+  PipelineName:
+    Description: Name of the created pipeline.
+    Value: !Ref Pipeline
+  CodeBuildProject:
+    Description: CodeBuild project that runs the static scan.
+    Value: !Ref BuildProject
+  ArtifactBucket:
+    Description: S3 bucket storing pipeline artifacts.
+    Value: !Ref PipelineArtifactBucket
+
+# Optional enhancement:
+# - Configure CloudWatch Events / EventBridge rules targeting SNS or ChatOps channels
+#   for pipeline stage state changes to alert operators on approval requests.
+# - To summarise scan findings in manual approval, author a custom action/Lambda that reads artifacts/scan.json
+#   and posts the top 10 findings to the approval comment via codepipeline:PutApprovalResult.
