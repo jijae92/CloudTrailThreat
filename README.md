@@ -150,14 +150,15 @@ make deploy     # sam build && sam deploy --guided
 ## 아키텍처 개요
 ```mermaid
 flowchart LR
-    CT[CloudTrail S3 Logs] -->|Glue Catalog| Athena[Amazon Athena Query Pack]
-    Athena -->|findings| ScannerCLI[Scanner CLI (Python)]
-    ScannerCLI -->|scan.json| CodeBuild
-    CodeBuild --> CodePipeline
-    CodePipeline -->|Manual Approval| Deploy[CloudFormation Deploy]
-    CodePipeline --> PreHook[Lambda Pre-Deploy Hook]
-    Deploy --> PostHook[Lambda Post-Deploy Hook]
-    ScannerCLI -->|metrics| Streamlit[Streamlit Dashboard]
+  CT[CloudTrail S3 Logs] --> Glue[Glue Catalog]
+  Glue --> Athena[Amazon Athena]
+  Athena --> Scanner[Scanner CLI Python]
+  Scanner -->|scan json| CodeBuild[CodeBuild]
+  CodeBuild --> CodePipeline[CodePipeline]
+  CodePipeline -->|Manual Approval| Deploy[CloudFormation Deploy]
+  CodePipeline --> PreHook[Lambda Pre Deploy Hook]
+  Deploy --> PostHook[Lambda Post Deploy Hook]
+  Scanner -->|metrics| Streamlit[Streamlit Dashboard]
 ```
 - **CloudTrail S3 → Athena/Glue:** 표준 쿼리팩으로 의심 이벤트 추출.
 - **Scanner CLI:** IaC/Lambda를 정적 분석하여 `artifacts/scan.json` 생성.
